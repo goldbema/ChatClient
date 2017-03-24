@@ -1,0 +1,269 @@
+#!/usr/bin/python
+
+"""
+     Filename: chatserve
+       Author: Maxwell Goldberg
+Last Modified: 02.12.17
+  Description: Provides a ServerSocket class that initializes a chatserve socket
+               connection, provides a main server loop method, and methods for
+               creating, sending, and receiving chat messages. The main method
+               initializes and sets the server to listen. This script also 
+               contains an ancillary method used for validating the user port.
+"""
+
+from socket import *
+import signal
+import sys
+
+
+HEADER_LEN = 3             # Each chat message has three numeric characters
+                           # prepended to it. These characters identify the 
+                           # length in bytes of the message that follows.         
+HANDLE     = "chatserve"   
+MAX_BYTES  = 516           # 3 numeric characters + 10 handle characters +
+                           # 2 handle suffix characters + 500 characters 
+                           # + 1 null terminator.
+MAX_MSG    = 500           # 500 characters are permitted prior to a null 
+                           # terminator in each chat message.
+
+serverSocket = None        # Define the serverSocket globally so that it can be
+                           # accessed by the SIGINT handler.
+
+# Method: signal_handler()
+# Description: Upon receiving a SIGINT, attempts to close the server
+#              listening socket and exit without errors.
+# Parameters: signal - Integer signal number (unused).
+#             frame - The current stack frame object.  
+# Preconditions: None.
+# Returns: An exit status of 0 on success.
+
+def signal_handler(signal, frame):
+        if serverSocket is not None:
+		serverSocket.shutdown(SHUT_RDWR)
+		serverSocket.close()
+	print('\nExiting chatserve...')
+	sys.exit(0)
+
+# Register the SIGINT signal handler.
+
+signal.signal(signal.SIGINT, signal_handler)
+
+# Class Name: ServerSocket
+# Description: The ServerSocket class constructor initializes the server
+#              socket and binds it to the user-selected port. The loop()
+#              method causes the server to listen and attempt to accept
+#              a client connection, followed by engaging in chat 
+#              activities with this client until either side breaks the
+#              connection (voluntarily or involuntarily). The class also
+#              implements sending and receiving methods for chat 
+#              messages.
+
+class ServerSocket:
+
+        # Method: __init__()
+        # Description: Initializes a TCP socket intended for use with IPv4
+        #              addresses and binds this socket to the user-selected
+        #              port.
+        # Parameters: port - The user-selected port. 
+	# Preconditions: The user-selected port has been validated.
+
+	def __init__ (self, port):
+                # Create the socket.
+		self.sock = socket(AF_INET, SOCK_STREAM)
+                # Bind the socket to the user-selected port.
+		self.sock.bind(('', port))
+		self.port = port
+
+	# Method: loop()
+	# Description: The main server loops. The outer while-loop attempts to
+        #              form a single connection with a client, and the inner
+        #              while loop is responsible for exchanging messages
+        #              with a client until either party closes the connection.
+        # Parameters: None.
+        # Preconditions: The class has been initialized with a valid port.
+        #                Connection will not occur unless the client specifies
+        #                the server port correctly.
+
+	def loop (self):
+		# Client accepting loop.
+		while True:
+			print('Server listening on port ' + str(self.port) 
+                              + '...')
+                        # Listen for a single client connection.
+			self.sock.listen(1)
+			# Accept the client connection and pass it off to
+			# another server socket.
+			self.connSock, addr = self.sock.accept()
+			# Chat exchange loop.
+			while True:
+				# Attempt to acquire a client message.
+				try: 
+					sentence = self.chatReceive()
+				except RuntimeError:
+				# If the socket read method fails, close
+				# the connection.
+					self.connSock.close()
+					print('Connection closed by remote ' + 
+                                        'host. Returning to listening state.')
+					break;
+
+				# Print the client message.
+				print sentence
+				# Form a server message.
+				sentence = self.createMsg()
+				# If the message is '\quit', close the 
+				# connection and exit the loop.
+				if sentence == '\\quit':
+                                        self.connSock.shutdown(SHUT_RDWR)
+					self.connSock.close()
+					print('Connection closed.')
+					break
+
+				# Send the server message.
+				try:	
+					self.chatSend(sentence)
+				# If the socket send method fails, close
+				# the connection.
+				except RuntimeError:
+					self.connSock.close()
+					print('Connection closed by remote ' + 
+                                         'host. Returning to listening state.')
+					break
+	
+	# Method: createMsg()
+	# Description: Takes in user input. If the input is '\quit', it is
+	#              immediately returned. If the input exceeds 500 
+	#              characters (noting that Python will not append null
+	#              terminators to the end of srings) seek new input.
+	#              Otherwise, the message is formatted for reception
+	#              by the client and returned.
+	# Parameters: None.
+	# Preconditions: None.
+
+	def createMsg(self):
+		# Attempt to take in a valid message.
+		while True:
+			message = raw_input(HANDLE + "> ")
+			# If the message is \quit, return this immediately.
+                        if message == '\\quit':
+				return message
+			# If the message is greater than 500 characters
+			# seek new input.
+			if len(message) <= MAX_MSG:
+				break
+			print("chatserver: Maximum message length exceeded.")
+		
+		message = HANDLE + "> " + message		
+		# If the input is valid, append the length of the message
+		# including a null terminator to the front of the message,
+		# ensuring that the length is zero-padded to 3 characters.
+		# Append a null terminator at the end of the message.
+		message = '{:03d}'.format(len(message)+1) + message + '\0'
+		return message
+		
+	# Method: chatSend()
+	# Description: Attempts to send an entire message to the client.
+	# Parameters: message - The server's message for the client.
+	# Preconditions: The message has been correctly formatted by
+	#                createMsg().
+
+	def chatSend (self, message):
+		# Maintain a variable to track how much data (in bytes) have
+		# been sent through the socket.
+		totalSent = 0
+		# While message data remains to be sent, call socket send()
+		# on the remainder of the message.
+		while totalSent < len(message):
+			sent = self.connSock.send(message[totalSent:])
+			# If no data is sent, an error has occurred. Raise
+			# an exception to be handled outside this function.
+			if sent == 0:
+				raise RuntimeError("send: socket connection " +
+                                                   "broken")
+			totalSent += sent
+
+	# Method: chatReceive()
+	# Description: Attempts to receive an entire client message.
+	# Parameters: None.
+	# Preconditions: The server socket has been initialized.
+	#                The message is correctly formatted.
+
+	def chatReceive (self):
+		# First, take in the fixed length length of the rest of
+		# the message.
+		header = self._chatReceive(HEADER_LEN)
+		# Use the length received to determine how many characters
+		# to take in from the message body.
+		body = self._chatReceive( int(header) )
+		# Return the message body.
+                return body
+
+	# Method: _chatReceive()
+	# Description: A helper function for chatReceive() that invokes 
+	#              the socket API recv method.
+	# Parameters: msgLen - The number of characters to take in from
+	#             the client.
+	# Preconditions: The server socket has been initialized. The message
+	#                is correctly formatted.
+	def _chatReceive (self, msgLen):
+		chunks = []       # Initialize an array to hold individual
+				  # sections received from the client.
+		bytesReceived = 0 # Initialize a byte counting variable.
+
+		# While bytes remain to be received, call recv().
+		while bytesReceived < msgLen:
+			chunk = self.connSock.recv(msgLen - bytesReceived)
+			# If an empty string is received, the connection
+			# is broken, so raise an error.
+			if chunk == '':
+				raise RuntimeError("recv: socket " + 
+                                                   "connection broken")
+			# Append the chunk received to the array.
+			chunks.append(chunk)
+			# Increase the byte count.
+			bytesReceived = bytesReceived + len(chunk)
+		# Return a string made from the chunks array.
+		return ''.join(chunks)
+
+# Method: argsValidate()
+# Description: Validates the port argument passed on the command line.
+# Parameters: None.
+# Preconditions: None.
+
+def argsValidate():
+	# If more than one argument is passed, exit and display a usage message.
+	if len(sys.argv) != 2:
+		print("Usage: chatserve port")
+		sys.exit(1)
+	# If the argument can't be parsed as an integer, exit with an error.
+	try:
+		port = int(sys.argv[1])
+	except:
+		print("chatserve: port must be an integer")
+		sys.exit(1)
+	# If the port isn't between 1024 and 65535, exit with an error.
+	if port < 0 or port > 65535:
+		print("chatserve: port must be an integer b/w 1024 and 65535")
+		sys.exit(1)
+
+	# Return the validated port.
+	return port	
+
+# Method: main()
+# Description: The main server method.
+# Parameters: None.
+# Preconditions: None.
+
+def main():
+	# Validate the port.
+	port = argsValidate() 	
+	# Initialize the server.
+	serverSocket = ServerSocket(port)
+	# Enter the server loop.
+	serverSocket.loop()
+	# Exit without errors. Note that this is never invoked but is included
+	# for style purposes.
+	sys.exit(0)
+
+if __name__ == '__main__':
+	main()
